@@ -1,0 +1,208 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-harvester}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-harvester}
+      POSTGRES_DB: ${POSTGRES_DB:-harvester}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-harvester}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-minioadmin}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  crawlberg:
+    image: ghcr.io/xberg-io/crawlberg:latest
+    command: ["serve", "--host", "0.0.0.0", "--port", "3000"]
+    ports:
+      - "3000:3000"
+    environment:
+      RUST_LOG: info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: uvicorn harvester.api.main:app --host 0.0.0.0 --port 8000 --reload
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-harvester}:${POSTGRES_PASSWORD:-harvester}@postgres:5432/${POSTGRES_DB:-harvester}
+      REDIS_URL: redis://redis:6379/0
+      CRAWLBERG_API_URL: http://crawlberg:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-harvester-documents}
+      S3_SECURE: "false"
+      WEBSHARE_USE_PROXY: ${WEBSHARE_USE_PROXY:-false}
+      WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
+      WEBSHARE_PROXY_USERNAME: ${WEBSHARE_PROXY_USERNAME:-}
+      WEBSHARE_PROXY_PASSWORD: ${WEBSHARE_PROXY_PASSWORD:-}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      DEBUG: ${DEBUG:-false}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./harvester:/app/harvester
+      - harvester_temp:/tmp/harvester
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      crawlberg:
+        condition: service_healthy
+
+  worker-discovery:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A harvester.pipeline.celery_app worker -Q discovery -l INFO --concurrency=1
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-harvester}:${POSTGRES_PASSWORD:-harvester}@postgres:5432/${POSTGRES_DB:-harvester}
+      REDIS_URL: redis://redis:6379/0
+      CRAWLBERG_API_URL: http://crawlberg:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-harvester-documents}
+      S3_SECURE: "false"
+      WEBSHARE_USE_PROXY: ${WEBSHARE_USE_PROXY:-false}
+      WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./harvester:/app/harvester
+      - harvester_temp:/tmp/harvester
+    depends_on:
+      - postgres
+      - redis
+      - crawlberg
+
+  worker-extraction:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A harvester.pipeline.celery_app worker -Q extraction,download -l INFO --concurrency=2
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-harvester}:${POSTGRES_PASSWORD:-harvester}@postgres:5432/${POSTGRES_DB:-harvester}
+      REDIS_URL: redis://redis:6379/0
+      CRAWLBERG_API_URL: http://crawlberg:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-harvester-documents}
+      S3_SECURE: "false"
+      WEBSHARE_USE_PROXY: ${WEBSHARE_USE_PROXY:-false}
+      WEBSHARE_API_KEY: ${WEBSHARE_API_KEY:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./harvester:/app/harvester
+      - harvester_temp:/tmp/harvester
+    depends_on:
+      - postgres
+      - redis
+      - crawlberg
+
+  worker-ocr:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A harvester.pipeline.celery_app worker -Q ocr,transform -l INFO --concurrency=1
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-harvester}:${POSTGRES_PASSWORD:-harvester}@postgres:5432/${POSTGRES_DB:-harvester}
+      REDIS_URL: redis://redis:6379/0
+      CRAWLBERG_API_URL: http://crawlberg:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-harvester-documents}
+      S3_SECURE: "false"
+      OCR_LANGUAGES: ${OCR_LANGUAGES:-eng}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./harvester:/app/harvester
+      - harvester_temp:/tmp/harvester
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    depends_on:
+      - postgres
+      - redis
+      - crawlberg
+
+  worker-embedding:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: celery -A harvester.pipeline.celery_app worker -Q embedding,storage,validation,orchestration -l INFO --concurrency=1
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-harvester}:${POSTGRES_PASSWORD:-harvester}@postgres:5432/${POSTGRES_DB:-harvester}
+      REDIS_URL: redis://redis:6379/0
+      CRAWLBERG_API_URL: http://crawlberg:3000
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-harvester-documents}
+      S3_SECURE: "false"
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-sentence-transformers/all-MiniLM-L6-v2}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./harvester:/app/harvester
+      - harvester_temp:/tmp/harvester
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  harvester_temp:

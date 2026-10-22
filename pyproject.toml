@@ -1,0 +1,48 @@
+[project]
+name = "harvester"
+version = "0.1.0"
+description = "Document harvesting pipeline: crawl, download, OCR, embed, store"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.6.0",
+    "sqlalchemy>=2.0.36",
+    "alembic>=1.14.0",
+    "psycopg2-binary>=2.9.10",
+    "redis>=5.2.0",
+    "celery>=5.4.0",
+    "crawlberg>=1.6.0",
+    "httpx>=0.28.0",
+    "requests>=2.32.0",
+    "boto3>=1.35.0",
+    "botocore>=1.35.0",
+    "aiofiles>=24.1.0",
+    "pyarrow>=18.0.0",
+    "pandas>=2.2.0",
+    "sentence-transformers>=3.3.0",
+    "numpy>=2.1.0",
+    "docling>=2.0.0",
+    "python-multipart>=0.0.18",
+    "structlog>=24.2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "httpx>=0.28.0",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
