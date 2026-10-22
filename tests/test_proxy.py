@@ -1,69 +1,43 @@
 import pytest
 
-from harvester.proxy import ProxyManager
+from harvester.proxy import WebshareProxy
 
 
-class TestProxyManager:
-    def test_disabled_proxy(self):
-        manager = ProxyManager(enabled=False)
-        assert manager.get_proxy_config() is None
-        assert manager.get_httpx_proxies() is None
-        assert manager.get_crawlberg_proxy_config() is None
+class TestWebshareProxy:
+    def test_disabled(self):
+        proxy = WebshareProxy(enabled=False)
+        assert proxy.get_proxy_config() is None
+        assert proxy.get_crawlberg_proxy() is None
+        assert proxy.get_env_proxies() is None
 
-    def test_rotating_proxy_url(self):
-        manager = ProxyManager(
-            enabled=True,
-            username="user123",
-            password="pass456",
-            host="proxy.example.com",
-            port=8080,
+    def test_rotating_endpoint_with_auth(self):
+        proxy = WebshareProxy(
+            enabled=True, username="user", password="pass",
+            host="p.webshare.io", port=80,
         )
-        assert manager.rotating_proxy_url == "http://user123:pass456@proxy.example.com:8080"
+        assert proxy.rotating_endpoint == "http://user:pass@p.webshare.io:80"
 
-    def test_rotating_proxy_url_no_auth(self):
-        manager = ProxyManager(
-            enabled=True,
-            host="proxy.example.com",
-            port=3128,
-        )
-        assert manager.rotating_proxy_url == "http://proxy.example.com:3128"
-
-    def test_get_proxy_config(self):
-        manager = ProxyManager(
-            enabled=True,
-            username="user",
-            password="pass",
-            host="p.webshare.io",
-            port=80,
-        )
-        config = manager.get_proxy_config()
-        assert config is not None
-        assert "p.webshare.io" in config.url
-        assert config.username == "user"
-
-    def test_get_httpx_proxies(self):
-        manager = ProxyManager(
-            enabled=True,
-            username="user",
-            password="pass",
-            host="p.webshare.io",
-            port=80,
-        )
-        proxies = manager.get_httpx_proxies()
-        assert proxies is not None
-        assert "http://" in proxies
-        assert "https://" in proxies
+    def test_rotating_endpoint_no_auth(self):
+        proxy = WebshareProxy(enabled=True, host="proxy.example.com", port=3128)
+        assert proxy.rotating_endpoint == "http://proxy.example.com:3128"
 
     def test_crawlberg_proxy_config(self):
-        manager = ProxyManager(
-            enabled=True,
-            username="user",
-            password="pass",
-            host="p.webshare.io",
-            port=80,
+        proxy = WebshareProxy(
+            enabled=True, username="user", password="pass",
+            host="p.webshare.io", port=80,
         )
-        config = manager.get_crawlberg_proxy_config()
-        assert config is not None
-        assert "url" in config
-        assert config["username"] == "user"
-        assert config["password"] == "pass"
+        cfg = proxy.get_crawlberg_proxy()
+        assert cfg is not None
+        assert cfg["url"] == "http://user:pass@p.webshare.io:80"
+        assert cfg["username"] == "user"
+        assert cfg["password"] == "pass"
+
+    def test_env_proxies(self):
+        proxy = WebshareProxy(
+            enabled=True, username="u", password="p",
+            host="h", port=80,
+        )
+        env = proxy.get_env_proxies()
+        assert env is not None
+        assert "HTTP_PROXY" in env
+        assert "HTTPS_PROXY" in env

@@ -5,9 +5,9 @@ from pydantic import BaseModel, Field
 
 
 class JobRunCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=255)
+    job_run_id: int = Field(10, description="Job run ID (default 10)")
+    name: str = Field("Harvest Run", max_length=255)
     seed_urls: list[str] = Field(..., min_length=1)
-    job_run_id: Optional[int] = Field(None, description="Custom job run ID (auto-assigned if not provided)")
     max_depth: int = Field(3, ge=0, le=10)
     max_pages: int = Field(1000, ge=1, le=100000)
     config: dict = Field(default_factory=dict)
@@ -21,12 +21,15 @@ class JobRunResponse(BaseModel):
     seed_urls: list[str]
     max_depth: int
     max_pages: int
-    total_pages_discovered: int
-    total_pages_processed: int
-    total_documents_downloaded: int
-    total_documents_ocr: int
-    total_documents_stored: int
-    crawlberg_crawl_job_id: Optional[str]
+    total_items: int
+    items_discovered: int
+    items_indexed: int
+    items_extracted: int
+    items_ocr_complete: int
+    items_transformed: int
+    items_stored: int
+    items_validated: int
+    items_failed: int
     error_message: Optional[str]
     created_at: datetime
     updated_at: datetime
@@ -34,82 +37,64 @@ class JobRunResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
-class JobRunListResponse(BaseModel):
-    total: int
-    items: list[JobRunResponse]
-
-
-class PageResponse(BaseModel):
+class QueueItemResponse(BaseModel):
     id: str
     url: str
     normalized_url: str
     depth: int
-    status: str
+    item_type: str
+    current_stage: str
+    overall_status: str
+    crawlberg_job_id: Optional[str]
     title: Optional[str]
     content_type: Optional[str]
     http_status: Optional[int]
-    discovered_document_urls: list
-    created_at: datetime
-
-    model_config = {"from_attributes": True}
-
-
-class DocumentResponse(BaseModel):
-    id: str
-    source_url: str
-    filename: Optional[str]
-    content_type: Optional[str]
-    file_size: Optional[int]
-    file_hash: Optional[str]
-    status: str
-    chunk_count: int
-    embedding_count: int
+    is_document: bool
+    document_filename: Optional[str]
+    document_size: Optional[int]
+    parquet_rows: int
     s3_original_key: Optional[str]
     s3_parquet_key: Optional[str]
     s3_json_key: Optional[str]
     s3_markdown_key: Optional[str]
-    s3_embeddings_key: Optional[str]
     error_message: Optional[str]
+    stage_statuses: dict
     created_at: datetime
+    updated_at: datetime
 
     model_config = {"from_attributes": True}
 
 
-class DocumentListResponse(BaseModel):
+class QueueItemListResponse(BaseModel):
     total: int
-    items: list[DocumentResponse]
+    items: list[QueueItemResponse]
 
 
-class PipelineTriggerRequest(BaseModel):
+class PipelineRunRequest(BaseModel):
+    job_run_id: int = Field(10)
+    seed_urls: list[str] = Field(..., min_length=1)
+    name: str = Field("Harvest Run", max_length=255)
+    max_depth: int = Field(3, ge=0, le=10)
+    max_pages: int = Field(1000, ge=1, le=100000)
+
+
+class PipelineRunResponse(BaseModel):
     job_run_id: int
-    seed_urls: list[str]
-
-
-class PipelineStatusResponse(BaseModel):
-    job_run_id: int
-    celery_task_id: Optional[str]
     status: str
+    discovered: int
+    indexed: int
+    extracted: int
+    ocr: int
+    transformed: int
+    stored: int
+    validation: dict
+
+
+class StageRunRequest(BaseModel):
+    stage: str = Field(..., description="Stage to run: discover, index, extract, ocr, transform, store, validate")
 
 
 class HealthResponse(BaseModel):
     status: str
     version: str
     services: dict
-
-
-class SearchRequest(BaseModel):
-    query: str = Field(..., min_length=1)
-    job_run_id: Optional[int] = None
-    limit: int = Field(10, ge=1, le=100)
-
-
-class SearchResultItem(BaseModel):
-    document_id: str
-    source_url: str
-    chunk_text: str
-    score: float
-
-
-class SearchResponse(BaseModel):
-    query: str
-    results: list[SearchResultItem]

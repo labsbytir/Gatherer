@@ -1,14 +1,12 @@
 from harvester.models.base import Base
-from harvester.models.job import JobRun, JobStatus
-from harvester.models.page import Page, PageStatus
-from harvester.models.document import Document, DocumentStatus
+from harvester.models.job_run import JobRun, JobRunStatus
+from harvester.models.queue_item import QueueItem, Stage, StageStatus
 
 __all__ = [
     "Base",
     "JobRun",
-    "JobStatus",
-    "Page",
-    "PageStatus",
-    "Document",
-    "DocumentStatus",
+    "JobRunStatus",
+    "QueueItem",
+    "Stage",
+    "StageStatus",
 ]
