@@ -1,3 +1,3 @@
-from harvester.crawler.client import CrawlbergClient
+from harvester.crawler.crawlberg_queue import CrawlbergQueue
 
-__all__ = ["CrawlbergClient"]
+__all__ = ["CrawlbergQueue"]

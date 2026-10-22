@@ -24,7 +24,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="Document harvesting pipeline: crawl, download, OCR, embed, store",
+    description="Recursive Crawling Queue Builder — 8-stage document harvesting pipeline",
     lifespan=lifespan,
 )
 
@@ -47,15 +47,3 @@ def root():
         "docs": "/docs",
         "api": "/api/v1",
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(
-        "harvester.api.main:app",
-        host=settings.api_host,
-        port=settings.api_port,
-        workers=settings.api_workers,
-        reload=settings.api_reload,
-    )

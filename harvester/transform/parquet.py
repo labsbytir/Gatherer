@@ -1,7 +1,10 @@
 import json
+import os
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -18,91 +21,125 @@ class TransformResult:
     parquet_path: Path
     row_count: int
     columns: list[str]
-    schema: dict = field(default_factory=dict)
+    method: str = "pyarrow"
 
 
 class ParquetTransformer:
     """
     Transforms Docling JSON output into Apache Parquet format.
 
-    Flattens the nested DoclingDocument JSON into a columnar format
-    suitable for analytics, vector search, and data warehousing.
+    Primary method: parquet-converter (Go binary) as specified
+    Fallback: PyArrow (pure Python)
+
+    Reference: https://github.com/iwillwen/parquet-converter
     """
 
     def __init__(self, temp_dir: str | None = None):
         self.temp_dir = Path(temp_dir or settings.temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.use_go_converter = settings.use_parquet_converter
+        self.go_binary = settings.parquet_converter_path
 
-    def transform_docling_json(
+    def transform(
         self,
         docling_json: dict,
         document_id: str,
         source_url: str,
-        output_filename: str | None = None,
-    ) -> TransformResult:
-        """
-        Transform a DoclingDocument JSON into a Parquet file.
-
-        Each row represents a text chunk/section from the document.
-        """
-        rows = self._flatten_docling_document(docling_json, document_id, source_url)
-        return self._write_parquet(rows, output_filename or f"{document_id}.parquet")
-
-    def transform_records(
-        self,
-        records: list[dict],
         output_filename: str,
-        schema: pa.Schema | None = None,
     ) -> TransformResult:
-        """
-        Transform a list of records (dicts) into a Parquet file.
-        """
-        return self._write_parquet(records, output_filename, schema)
+        rows = self._flatten_docling(docling_json, document_id, source_url)
+        output_path = self.temp_dir / output_filename
 
-    def transform_json_file(
-        self,
-        json_path: str | Path,
-        output_filename: str | None = None,
-    ) -> TransformResult:
+        if self.use_go_converter and self._go_binary_exists():
+            try:
+                return self._transform_with_go(rows, output_path)
+            except Exception as e:
+                logger.warning("parquet-converter failed, falling back to PyArrow", error=str(e))
+
+        return self._transform_with_pyarrow(rows, output_path)
+
+    def _go_binary_exists(self) -> bool:
+        return Path(self.go_binary).exists() or self._which(self.go_binary) is not None
+
+    @staticmethod
+    def _which(binary: str) -> str | None:
+        for path in os.environ.get("PATH", "").split(os.pathsep):
+            candidate = Path(path) / binary
+            if candidate.exists() and os.access(candidate, os.X_OK):
+                return str(candidate)
+        if "/" in binary and Path(binary).exists():
+            return binary
+        return None
+
+    def _transform_with_go(self, rows: list[dict], output_path: Path) -> TransformResult:
         """
-        Transform a JSON file (array of objects or single object) into Parquet.
+        Use parquet-converter (Go) to convert JSON to Parquet.
+
+        parquet-converter expects a JSON file with:
+        {
+          "columns": [{"name": "col1", "val_type": "UTF8", "repetition_type": "REQUIRED"}, ...],
+          "rows": [[val1, val2, ...], ...]
+        }
         """
-        json_path = Path(json_path)
-        data = json.loads(json_path.read_text(encoding="utf-8"))
+        columns = self._infer_columns(rows)
+        column_defs = [
+            {"name": c["name"], "val_type": c["val_type"], "repetition_type": "OPTIONAL"}
+            for c in columns
+        ]
+        row_values = [[row.get(c["name"]) for c in columns] for row in rows]
 
-        if isinstance(data, dict):
-            if "rows" in data and "columns" in data:
-                records = self._convert_columnar_format(data)
-            else:
-                records = [data]
-        elif isinstance(data, list):
-            records = data
-        else:
-            raise ValueError(f"Unsupported JSON structure in {json_path}")
+        input_json = {
+            "columns": column_defs,
+            "rows": row_values,
+        }
 
-        output_name = output_filename or json_path.stem + ".parquet"
-        return self._write_parquet(records, output_name)
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".json", delete=False, dir=str(self.temp_dir)
+        ) as f:
+            json.dump(input_json, f)
+            input_file = f.name
 
-    def _flatten_docling_document(
-        self,
-        doc: dict,
-        document_id: str,
-        source_url: str,
-    ) -> list[dict]:
-        """
-        Flatten a DoclingDocument into rows for Parquet.
+        try:
+            binary = self._which(self.go_binary) or self.go_binary
+            cmd = [binary, "json2parquet", "-file", input_file, "-out", str(output_path)]
+            logger.info("Running parquet-converter", cmd=" ".join(cmd))
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                raise RuntimeError(f"parquet-converter failed: {result.stderr}")
 
-        Extracts text chunks with their metadata, hierarchy, and page info.
-        """
-        rows: list[dict] = []
+            table = pq.read_table(output_path)
+            return TransformResult(
+                parquet_path=output_path,
+                row_count=table.num_rows,
+                columns=table.column_names,
+                method="parquet-converter",
+            )
+        finally:
+            Path(input_file).unlink(missing_ok=True)
 
+    def _transform_with_pyarrow(self, rows: list[dict], output_path: Path) -> TransformResult:
+        if not rows:
+            rows = [{}]
+        table = pa.Table.from_pylist(rows)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        pq.write_table(table, output_path, compression="snappy", version="2.6")
+
+        logger.info("Wrote Parquet via PyArrow", path=str(output_path), rows=table.num_rows)
+        return TransformResult(
+            parquet_path=output_path,
+            row_count=table.num_rows,
+            columns=table.column_names,
+            method="pyarrow",
+        )
+
+    def _flatten_docling(self, doc: dict, document_id: str, source_url: str) -> list[dict]:
+        rows = []
         doc_name = doc.get("name", "")
         origin = doc.get("origin", {})
         mimetype = origin.get("mimetype", "")
 
-        texts = doc.get("texts", [])
-        for i, text_item in enumerate(texts):
-            row = {
+        for i, text_item in enumerate(doc.get("texts", [])):
+            rows.append({
                 "document_id": document_id,
                 "source_url": source_url,
                 "document_name": doc_name,
@@ -111,9 +148,7 @@ class ParquetTransformer:
                 "text": text_item.get("text", ""),
                 "label": text_item.get("label", ""),
                 "page_no": text_item.get("page_no"),
-                "prov": json.dumps(text_item.get("prov", []), ensure_ascii=False),
-            }
-            rows.append(row)
+            })
 
         if not rows:
             rows.append({
@@ -125,126 +160,20 @@ class ParquetTransformer:
                 "text": doc.get("markdown", "") or "",
                 "label": "full_document",
                 "page_no": None,
-                "prov": "[]",
             })
-
-        tables = doc.get("tables", [])
-        for t_idx, table in enumerate(tables):
-            table_data = table.get("data", {})
-            num_rows = table_data.get("num_rows", 0)
-            num_cols = table_data.get("num_cols", 0)
-            cells = table_data.get("table_cells", [])
-
-            rows.append({
-                "document_id": document_id,
-                "source_url": source_url,
-                "document_name": doc_name,
-                "mimetype": mimetype,
-                "chunk_index": len(rows),
-                "text": json.dumps(table_data, ensure_ascii=False),
-                "label": "table",
-                "page_no": table.get("prov", [{}])[0].get("page_no") if table.get("prov") else None,
-                "prov": json.dumps(table.get("prov", []), ensure_ascii=False),
-                "table_index": t_idx,
-                "table_rows": num_rows,
-                "table_cols": num_cols,
-                "table_cells": len(cells),
-            })
-
-        pictures = doc.get("pictures", [])
-        for p_idx, picture in enumerate(pictures):
-            caption = ""
-            for caption_ref in picture.get("captions", []):
-                caption_ref_idx = caption_ref.get("cref", "")
-                for text_item in texts:
-                    if text_item.get("self_ref") == caption_ref_idx:
-                        caption = text_item.get("text", "")
-                        break
-
-            rows.append({
-                "document_id": document_id,
-                "source_url": source_url,
-                "document_name": doc_name,
-                "mimetype": mimetype,
-                "chunk_index": len(rows),
-                "text": caption,
-                "label": "picture",
-                "page_no": picture.get("prov", [{}])[0].get("page_no") if picture.get("prov") else None,
-                "prov": json.dumps(picture.get("prov", []), ensure_ascii=False),
-                "picture_index": p_idx,
-                "picture_caption": caption,
-            })
-
-        metadata_row = {
-            "document_id": document_id,
-            "source_url": source_url,
-            "document_name": doc_name,
-            "mimetype": mimetype,
-            "chunk_index": -1,
-            "text": json.dumps(doc.get("metadata", {}), ensure_ascii=False) if doc.get("metadata") else "",
-            "label": "metadata",
-            "page_no": None,
-            "prov": "[]",
-        }
-        rows.append(metadata_row)
 
         return rows
 
-    def _write_parquet(
-        self,
-        records: list[dict],
-        output_filename: str,
-        schema: pa.Schema | None = None,
-    ) -> TransformResult:
-        """
-        Write records to a Parquet file.
-        """
-        if not records:
-            records = [{}]
-
-        table = pa.Table.from_pylist(records, schema=schema)
-        output_path = self.temp_dir / output_filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        pq.write_table(
-            table,
-            output_path,
-            compression="snappy",
-            version="2.6",
-        )
-
-        logger.info(
-            "Wrote Parquet file",
-            path=str(output_path),
-            rows=table.num_rows,
-            columns=table.num_columns,
-        )
-
-        return TransformResult(
-            parquet_path=output_path,
-            row_count=table.num_rows,
-            columns=table.column_names,
-            schema={col: str(table.schema.field(col).type) for col in table.column_names},
-        )
-
-    def _convert_columnar_format(self, data: dict) -> list[dict]:
-        """
-        Convert the parquet-converter's columnar JSON format to records.
-        """
-        columns = data.get("columns", [])
-        rows = data.get("rows", [])
-        col_names = [c["name"] for c in columns]
-        records = []
+    def _infer_columns(self, rows: list[dict]) -> list[dict]:
+        if not rows:
+            return []
+        type_map = {str: "UTF8", int: "INT64", float: "DOUBLE", bool: "BOOLEAN"}
+        columns = []
+        seen = set()
         for row in rows:
-            record = {}
-            for i, name in enumerate(col_names):
-                record[name] = row[i] if i < len(row) else None
-            records.append(record)
-        return records
-
-    def read_parquet(self, parquet_path: str | Path) -> list[dict]:
-        """
-        Read a Parquet file back into a list of dicts.
-        """
-        table = pq.read_table(parquet_path)
-        return table.to_pylist()
+            for key, value in row.items():
+                if key not in seen:
+                    seen.add(key)
+                    val_type = type_map.get(type(value), "UTF8")
+                    columns.append({"name": key, "val_type": val_type})
+        return columns
